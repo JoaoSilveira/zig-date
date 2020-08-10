@@ -198,7 +198,7 @@ pub const DateTime = struct {
     /// - `nnn`: zero-filled 3 digit millisecond
     /// - *else*: character is escaped
     pub fn format(self: Self, comptime fmt: []const u8, writer: anytype) !void {
-        if (fmt.len == 0) return format(self, "yyyy-MM-ddThh:mm:ss.nnnZ", writer);
+        if (fmt.len == 0) return format(self, "yyyy-MM-ddTHH:mm:ss.nnnZ", writer);
 
         comptime var start: usize = 0;
         comptime var state = FormatState.Literal;
@@ -466,10 +466,10 @@ pub const DateTime = struct {
 pub const GregorianDateTime = struct {
     const Self = @This();
 
-    const days_in_year = 365;
-    const days_in_four_years = days_in_year * 4 + 1; // + 1 leap day
-    const days_in_century = days_in_four_years * 25 - 1; // every 100 years do not have a leap day
-    const days_in_four_centuries = days_in_century * 4 + 1; // but 400 years do have
+    pub const days_in_year = 365;
+    pub const days_in_four_years = days_in_year * 4 + 1; // + 1 leap day
+    pub const days_in_century = days_in_four_years * 25 - 1; // every 100 years do not have a leap day
+    pub const days_in_four_centuries = days_in_century * 4 + 1; // but 400 years do have
 
     const days_in_months = [12]u5{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
     const acc_days_in_month = [13]u16{ 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365 };
@@ -478,10 +478,8 @@ pub const GregorianDateTime = struct {
     timestamp: i64,
 
     /// initializes a from a date
-    pub fn fromDate(year: u32, month: u4, day: u5) !Self {
-        if (year == 0) return error.InvalidDate;
-        if (month == 0 or month > 12) return error.InvalidDate;
-        if (day == 0 or day > daysInMonth(month, isLeapYear(year))) return error.InvalidDate;
+    pub fn fromDate(year: i32, month: u4, day: u5) !Self {
+        if (!isDateValid(year, month, day)) return error.InvalidDate;
 
         return .{
             .timestamp = millisFromDate(year, month, day),
@@ -490,7 +488,7 @@ pub const GregorianDateTime = struct {
 
     /// initializes from a date and time
     pub fn fromDateTime(
-        year: u32,
+        year: i32,
         month: u4,
         day: u5,
         hour: u5,
@@ -498,49 +496,42 @@ pub const GregorianDateTime = struct {
         second: u6,
         millisecond: u10,
     ) Self {
-        if (year == 0) return error.InvalidDate;
-        if (month == 0 or month > 12) return error.InvalidDate;
-        if (day == 0 or day > daysInMonth(month, isLeapYear(year))) return error.InvalidDate;
-        if (hour >= 24) return error.InvalidDate;
-        if (minute >= 60) return error.InvalidDate;
-        if (second >= 60) return error.InvalidDate;
-        if (millisecond >= 1000) return error.InvalidDate;
+        if (!isDateValid(year, month, day)) return error.InvalidDate;
+        if (!isTimeValid(hour, minute, second, millisecond)) return error.InvalidTime;
 
         return .{
             .timestamp = millisFromDateTime(year, month, day, hour, minute, second, millisecond),
         };
     }
 
-    /// Gets the actual date and time
-    // horary not working, not sure why
+    /// Gets the actual UTC date and time
     pub fn now() Self {
+        const timestamp = std.time.milliTimestamp();
         return .{
-            .timestamp = std.time.milliTimestamp() + @intCast(i64, millis_from_1970),
+            .timestamp = timestamp + millis_from_1970,
         };
     }
 
-    /// Gets the actual date
-    // apparently functionting
+    /// Gets the actual UTC date
     pub fn today() Self {
-        var timestamp = std.time.milliTimestamp();
-        timestamp -= @mod(timestamp, std.time.ms_per_day);
+        var timestamp = std.time.milliTimestamp() + millis_from_1970;
+        timestamp -= @mod(timestamp, std.time.ms_per_day); // towards -inf
 
         return .{
-            .timestamp = timestamp + @intCast(i64, millis_from_1970),
+            .timestamp = timestamp,
         };
     }
 
     /// Tells the week day, 0 is Sunday and 6 is Saturday
     pub fn weekDay(self: Self) u3 {
-        const abs = std.math.absCast(self.timestamp);
-        const wk = @divTrunc(abs, std.time.ms_per_day) + 1;
+        const days = @divFloor(self.timestamp, std.time.ms_per_day);
 
-        return @intCast(u3, @mod(wk, 7));
+        return @intCast(u3, @intCast(u64, @rem(days, 7) + 8) % 7);
     }
 
     pub fn getDateTime(self: Self) DateTime {
-        var days = @divTrunc(self.timestamp, std.time.ms_per_day);
-        var horary = self.timestamp - days * std.time.ms_per_day;
+        var days = @divFloor(self.timestamp, std.time.ms_per_day);
+        var horary = @intCast(u32, @mod(self.timestamp, std.time.ms_per_day));
 
         // four centuries in whole year interval
         const f_c = @divTrunc(days, days_in_four_centuries);
@@ -549,7 +540,7 @@ pub const GregorianDateTime = struct {
         const c = brk: {
             var cent = @divTrunc(days, days_in_century); // centuries, [0, 3] in 400 years interval
             // if it's the last day of the four centuries period subtract one
-            cent -= @as(i64, @boolToInt(cent == 4));
+            cent -= @as(i64, @boolToInt(cent == 4 or cent == -4));
             break :brk cent;
         };
         days -= c * days_in_century; // days %= days_in_century
@@ -562,48 +553,58 @@ pub const GregorianDateTime = struct {
             // a year, [0, 3] in 4 years interval
             var year = @divTrunc(days, days_in_year);
             // if it's the last day of the four year period subtract one
-            year -= @as(i64, @boolToInt(year == 4));
+            year -= @as(i64, @boolToInt(year == 4 or year == -4));
             break :brk year;
         };
         days -= y * days_in_year; // days %= days_in_year
 
         var dt: DateTime = undefined;
+        dt.year = @intCast(i32, f_c * 400 + c * 100 + f * 4 + y + 1);
+        dt.is_leap_year = isLeapYear(dt.year);
+
+        const total_days = @as(i16, days_in_year) + @as(i16, @boolToInt(dt.is_leap_year));
+        days = @intCast(i64, @mod(days + @as(i64, total_days), total_days));
 
         dt.day_of_the_year = @intCast(u16, days + 1);
-        dt.year = @intCast(i32, f_c * 400 + c * 100 + f * 4 + y + 1);
-        dt.is_leap_year = isLeapYear(@intCast(u32, dt.year));
         dt.month = monthFromDayOfTheYear(dt.day_of_the_year, dt.is_leap_year);
         dt.day = @intCast(u8, dt.day_of_the_year - acc_days_in_month[dt.month - 1] - @boolToInt(dt.is_leap_year and dt.day_of_the_year >= 60));
+        
         dt.hour = @intCast(u8, @divTrunc(horary, std.time.ms_per_hour));
-        horary -= @as(i64, dt.hour) * std.time.ms_per_hour;
-        dt.minute = @intCast(u8, @divTrunc(horary, std.time.ms_per_min));
-        horary -= @as(i64, dt.minute) * std.time.ms_per_min;
-        dt.second = @intCast(u8, @divTrunc(horary, std.time.ms_per_s));
-        dt.millisecond = @intCast(u16, horary - @as(i64, dt.second) * std.time.ms_per_s);
+        dt.minute = @intCast(u8, @divTrunc(horary, std.time.ms_per_min) % 60);
+        dt.second = @intCast(u8, @divTrunc(horary, std.time.ms_per_s) % 60);
+        dt.millisecond = @intCast(u16, horary % 1000);
 
         return dt;
     }
 
     /// Calculates the total of milliseconds of the date
-    fn millisFromDate(year: u32, month: u4, day: u5) u64 {
+    fn millisFromDate(year: i32, month: u4, day: u5) i64 {
         return daysFromDate(year, month, day) * std.time.ms_per_day;
     }
 
     /// Calculates the total of days of the date
-    fn daysFromDate(year: u32, month: u4, day: u5) u64 {
-        var days: u64 = (year - 1) * 365;
-        days += totalLeapDaysInYear(year - @boolToInt(month & 0xC != 0)); // month < 3
-        days += acc_days_in_month[month - 1];
-        days += day - 1;
+    fn daysFromDate(year: i32, month: u4, day: u5) i64 {
+        var days: i64 = @as(i64, day) - 1;
+
+        if (year < 0) {
+            const is_before_march = @as(i32, @boolToInt(month > 2));
+            days += year * days_in_year;
+            days -= @intCast(i32, totalLeapDaysInYear(year + is_before_march));
+        } else {
+            const is_after_february = @as(i32, @boolToInt(month < 3));
+            days += (year - 1) * days_in_year;
+            days += @intCast(i32, totalLeapDaysInYear(year - is_after_february));
+        }
+        days += @as(i32, acc_days_in_month[month - 1]);
 
         return days;
     }
 
     /// Calculates the total of milliseconds of the time
     fn millisFromTime(hour: u5, minute: u6, second: u6, millisecond: u10) u64 {
-        var millis: u64 = hour * std.time.ms_per_hour;
-        millis += minute * std.time.ms_per_min;
-        millist += second * std.time.ms_per_s;
+        var millis: u64 = @as(u64, hour) * std.time.ms_per_hour;
+        millis += @as(u64, minute) * std.time.ms_per_min;
+        millis += @as(u64, second) * std.time.ms_per_s;
         millis += millisecond;
 
         return millis;
@@ -612,53 +613,70 @@ pub const GregorianDateTime = struct {
     /// Tells the month by the day of the year
     fn monthFromDayOfTheYear(days: u16, is_leap: bool) u4 {
         // subtract one if feb 29 or later
-        var d = days - @boolToInt(days >= 60 and is_leap);
-        const index = @divTrunc(d - 1, 31);
+        var d = days - @boolToInt(is_leap and days >= 60);
+        const index = (d - 1) / 31;
 
         return @intCast(u4, index + 2 - @boolToInt(d <= acc_days_in_month[index + 1]));
     }
 
     /// Calculates the total of milliseconds of the date and time
     pub fn millisFromDateTime(
-        year: u32,
+        year: i32,
         month: u4,
         day: u5,
         hour: u5,
         minute: u6,
         second: u6,
         millisecond: u10,
-    ) u64 {
+    ) !u64 {
+        if (!isDateValid(year, month, day)) return error.InvalidDate;
+        if (!isTimeValid(hour, minute, second, millisecond)) return error.InvalidTime;
+
         return millisFromDate(year, month, day) + millisFromTime(hour, minute, second, millisecond);
     }
 
     /// Number of days in month
+    ///
+    /// `month`: month number from 1 to 12, values outside range will **panic**
+    /// `is_leap`: is leap year or not
     pub fn daysInMonth(month: u4, is_leap: bool) u5 {
         return days_in_months[month - 1] + @boolToInt(is_leap and month == 2);
     }
 
     /// Tells whether year is a leap year or not
-    pub fn isLeapYear(year: u32) bool {
+    pub fn isLeapYear(year: i32) bool {
 
         // (y divisible by 4 and not by 100) or y divisible by 400
-        return (year & 0x3 == 0 and year % 100 != 0) or year % 400 == 0;
+        return (@mod(year, 4) == 0 and @mod(year, 100) != 0) or @mod(year, 400) == 0;
     }
 
     /// Get the sum of leap days until `year`, inclusive
-    pub fn totalLeapDaysInYear(year: u32) u32 {
-        const cent = year / 100; // centuries
+    pub fn totalLeapDaysInYear(year: i32) u32 {
+        // negative years are mirrored at 0
+        const y = std.math.absCast(year);
+        const cent = y / 100; // centuries
 
         // year / 4 - year / 100 + year / 400
-        return (year >> 2) - cent + (cent >> 2);
+        return (y >> 2) - cent + (cent >> 2);
+    }
+
+    pub fn isDateValid(year: i32, month: u4, day: u5) bool {
+        return year != 0 and (month > 0 and month < 13) and (day > 0 and day <= daysInMonth(month, isLeapYear(year)));
+    }
+
+    pub fn isTimeValid(
+        hour: u5,
+        minute: u6,
+        second: u6,
+        millisecond: u10,
+    ) bool {
+        return hour < 24 and minute < 60 and second < 60 and millisecond < 1000;
     }
 
     /// Tells the week day of a date, 0 is Sunday and 6 is Saturday
-    pub fn weekDayOfDate(year: u32, month: u4, day: u5) u3 {
-        // Tomohiko Sakamoto's algorithm
-        const offset_from_jan = [12]u3{ 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
+    pub fn weekDayOfDate(year: i32, month: u4, day: u5) u3 {
+        const days = std.math.absCast(daysFromDate(year, month, day));
 
-        year -= @boolToInt(m & 0xFC != 0); // month < 3
-        const cent = @divTrunc(year, 100); // centuries
-
-        return (year + (year >> 2) - cent + (cent >> 2) + offset_from_jan[month - 1] + day) % 7;
+        return @intCast(u3, (days + 1) % 7);
     }
 };
